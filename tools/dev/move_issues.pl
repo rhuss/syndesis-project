@@ -28,11 +28,14 @@ GetOptions($opts,
            "labels|label|l",
            "repo|r=s",
            "oneshot",
-           "target|t",
-           "user",
-           "token",
+           "target|t=s",
+           "user=s",
+           "token=s",
            "dry-run|n",
            "clean",
+           "links",
+           "state=s",
+           "pause=s",
            "help|h"
           );
 if ($opts->{help}) {
@@ -47,14 +50,16 @@ if (! -f -f $config_file) {
 }
 
 
+my $config= YAML::Tiny->read($config_file)->[0];
+
 if ($opts->{repo}) {
-    my $config= YAML::Tiny->read($config_file)->[0];
     # Target repository
     my $target = $opts->{target} || $config->{target};
-    &migrate_repo($config, $opts);
+    &migrate_repo($opts, $config);
 } elsif ($opts->{labels}) {
-    my $config= YAML::Tiny->read($config_file)->[0];
-    &create_labels($config, $opts);
+    &create_labels($opts, $config);
+} elsif ($opts->{links}) {
+    &update_links($opts, $config);
 } else {
     &usage("Either --labels or --repo must be provided");
     exit 1;
@@ -68,9 +73,10 @@ Migrate issue from one GitHub repo to another
 
 Usage: $0 [...options...] (--labels|--repo <repo>)
 
-Mandatory arguments:
+Mandatory arguments (alternatively):
    --repo <repo>     : Migrate repo <repo> to target repo
    --labels          : Create labels in target repo
+   --links           : Update links *after* a migration
 
 Options:
    --config <config> : Configuration file holding mappings and auth information. Default: "<script dir>/config.yml"
@@ -81,6 +87,9 @@ Options:
    --token <token>   : GitHub auth token
    --dry             : Don't write, only test
    --clean           : Use a new fresh cache and remove the cache from the previous run
+   --state <file>    : State file to use
+   --pause <wait s>  : Pause for that main seconds after each write (default: 5s, use this to comply to 
+                       https://developer.github.com/v3/guides/best-practices-for-integrators/#dealing-with-abuse-rate-limits)
    --help            : this help message
 
 EOT
@@ -90,30 +99,103 @@ EOT
 
 # ===============================================================================================
 
-sub migrate_repo {
-    my $config = shift;
+sub update_links {
     my $opts = shift;
+    my $config = shift;
 
     my $repo = $opts->{repo};
 
+    my $state = $opts->{clean} ? {} : load_state($opts, $config);
+
+    my $target_issues = Pithub::Issues->new(&parse_auth($opts, $config));
+    my $list_result = $target_issues->list(&get_target_repo($opts,$config),
+                                           params => { state => 'open', direction => 'asc', sort => 'updated' },
+                                           auto_pagination => 1
+                                          );
+    my $count = 0;
+    print "Updating links for '$repo':\n";
+    my $repo_map = extract_repo_map($config);
+    while (my $issue = $list_result->next) {
+        # Ignore pull requests
+        next if $issue->{pull_request};
+        next unless $issue->{body} =~ m/\s(\w+?\/\w+?)?#(\d+)(\s|\.|$)/;
+        my $issue_id = $issue->{number};
+        print Dumper($issue); exit 0;
+        print "$issue_id: ";
+        my $body = $issue->{body};
+        my $processed = $state->{_links}->{$issue_id}->{body} || {};
+
+        print $body;
+        my $replacer = sub {
+            my $repo_name = shift;
+            my $number = shift;
+
+            my $repo;
+            if ($repo_name) {
+                $repo = $repo_map->{$repo_name};
+                return $repo_name . "#" . $number unless $repo;
+            } else {
+                $repo = &extract_module_repo_from_labels($issue);
+            }
+            my $mapped = $state->{$repo}->{$number};
+            if ($mapped) {
+                return "#" . $mapped->{new_id};
+            } else {
+                return $repo_name . "#" . $number;
+            }
+        };
+        $body =~ s/(\s)([\w\-]+?\/[\w\-]+?)?#(\d+)(\s|\.|$)/$1 . &$replacer($2,$3) . $4/ge;
+        print $body;
+        $state->{_links}->{$issue_id}->{body} = $processed;
+        #save_state($opts, $config, $state);
+        exit 0;
+    }
+}
+
+sub extract_repo_map {
+    my $config = shift;
+    my $ret = {};
+    for my $repo (keys %{$config->{repos}}) {
+        $ret->{$config->{repos}->{$repo}->{name}} = $repo;
+    }
+    return $ret;
+}
+
+sub extract_module_repo_from_labels {
+    my $issue = shift;
+    for my $label (@{$issue->{labels}}) {
+        if ($label->{name} =~ m|module/(.*)$|) {
+            return $1;
+        }
+    }
+    return undef;
+}
+
+
+sub migrate_repo {
+    my $opts = shift;
+    my $config = shift;
+
+    my $repo = $opts->{repo} || die "No repo given";
+
     # Cache for already processed issues
-    my $issues_processed = $opts->{clean} ? load_state("issues_processed.bin") : {};
+    my $state = $opts->{clean} ? {} : load_state($opts, $config);
 
     # Milestone mapping
-    my $milestone_map = &extract_milestones($config, $opts);
+    my $milestone_map = &extract_milestones($opts, $config);
 
     print "Migrating $repo:\n";
     
     # Fetch all source issues
-    my $source_issues = Pithub::Issues->new(&parse_auth($config, $opts));
+    my $source_issues = Pithub::Issues->new(&parse_auth($opts, $config));
     my $source = $config->{repos}->{$repo} || die "Unknown repo '$repo'";
     my $list_result = $source_issues->list(
                                            &parse_repo($source->{name}),
-                                           params => { state => 'open' },
-                                           auto_pagination => 1
+                                           params => { state => 'open', direction => 'asc', sort => 'updated' },
+                                           auto_pagination => 1,
                                           );
     # Handle for the target issues
-    my $target_issues = Pithub::Issues->new(&parse_auth($config, $opts));
+    my $target_issues = Pithub::Issues->new(&parse_auth($opts, $config));
 
     
     my $count = 0;
@@ -131,7 +213,7 @@ sub migrate_repo {
         print $issue_id,": ";
 
         # Get persisten cache for this issue
-        my $cache = $issues_processed->{$repo}->{$issue_id};
+        my $cache = $state->{$repo}->{$issue_id};
 
         my $new_issue_id;
         if (!$cache) {
@@ -155,10 +237,12 @@ sub migrate_repo {
                 $cache = {};
                 $cache->{new_id} = $new_issue_id;
                 $cache->{comments} = {};
-                $issues_processed->{$repo}->{$issue_id} = $cache;
-                save_state($opts, "issues_processed.bin",$issues_processed);
-                sleep 2;
+                $state->{$repo}->{$issue_id} = $cache;
+                save_state($opts, $config, $state);
+                sleep ($opts->{pause} || 5);
             } else {
+                map_labels($config, $repo, $issue->{labels});
+                map_milestone($issue->{milestone},$milestone_map);
                 print "[N] ";
             }
         } else {
@@ -180,27 +264,26 @@ sub migrate_repo {
                     next;
                 }
                 if (!$opts->{"dry-run"}) {
-                    my $new_comment_result = $target_issues->comments->create(&get_target_repo($opts,$config->{target}),
+                    my $new_comment_result = $target_issues->comments->create(&get_target_repo($opts,$config),
                                                                               issue_id => $new_issue_id,
                                                                               data => { body => map_comment($comment) }
                                                                              );                
                     die_on_error($new_comment_result, $opts);
                     print "+";
-                    sleep 2;
+                    sleep ($opts->{pause} || 5);
                     $count++;
+                    # print Dumper($comment);
+                    $cache->{comments}->{$comment_id} = $new_comment_result->content->{id};
+                    save_state($opts, $config,$state);
                 } else {
                     print "-";
                 }
-
-                # print Dumper($comment);
-                $cache->{comments}->{$comment_id}++;
-                save_state($opts, "issues_processed.bin",$issues_processed);
             }
         }
         print " : ",$new_issue_id,"\n";
-        save_state($opts, "issues_processed.bin",$issues_processed);
+        save_state($opts, $config, $state);
 
-        if ($count > 0 && !$count % 50) {
+        if ($count > 0 && ($count % 25 == 0)) {
             print "Sleeping for 60s to avoid rate limiting ...\n";
             sleep 60;
         }
@@ -210,10 +293,10 @@ sub migrate_repo {
 }
 
 sub create_labels {
-    my $config = shift;
     my $opts = shift;
+    my $config = shift;
 
-    my $target_labels = Pithub::Issues->new(&parse_auth($config, $opts))->labels;
+    my $target_labels = Pithub::Issues->new(&parse_auth($opts, $config))->labels;
     my $labels = $config->{labels} || die "No labels: defined in configuration";
     for my $label (sort keys %$labels) {
         my $color = $labels->{$label};
@@ -228,7 +311,7 @@ sub create_labels {
         if (!$result->success) {
             my $error = $result->content;
             if ($error->{errors}->[0]->{code} eq 'already_exists') {
-                print "updating\n";
+                print "update\n";
                 my $r = $target_labels->update(
                                                &get_target_repo($opts, $config),
                                                label => $label,
@@ -242,7 +325,7 @@ sub create_labels {
                 die Dumper($error);
             }
         } else {
-            print "created\n";
+            print "new\n";
         }
     }
 }
@@ -256,6 +339,7 @@ sub die_on_error {
         print Dumper($result) if $opts->{debug};
         my $content = $result->content;
         print "ERROR: ",$content->{message},"\n";
+        print Dumper($content);
         my $response = $result->response;
         print
           "Rate limit: ",$response->header("x-ratelimit-limit"),
@@ -288,7 +372,7 @@ sub map_labels {
     my $config = shift;
     my $repo = shift;
     my $labels = shift;
-    my $lmap = $config->{$repo}->{label_mapping} || {};
+    my $lmap = $config->{repos}->{$repo}->{label_mapping} || {};
     my @ret = ("module/$repo");
     
     for my $label (@$labels) {
@@ -343,7 +427,9 @@ sub get_random_color {
 }
 
 sub load_state {
-    my $file = shift;
+    my $opts = shift;
+    my $config = shift;
+    my $file = $opts->{'state'} || $config->{'state'} || "issues_state.bin";
     if (-f $file) {
         return retrieve($file);
     } else {
@@ -353,17 +439,18 @@ sub load_state {
 
 sub save_state {
     my $opts = shift;
-    my $file = shift;
+    my $config = shift;
     my $hash = shift;
+    my $file = $opts->{'state'} || $config->{'state'} || "issues_state.bin";
     store $hash, $file unless $opts->{"dry-run"};
 }
 
 sub extract_milestones {
-    my $config = shift;
     my $opts = shift;
-    my $milestones = Pithub::Issues::Milestones->new(&parse_auth($config, $opts));
+    my $config = shift;
+    my $milestones = Pithub::Issues::Milestones->new(&parse_auth($opts, $config));
     my $ret = {};
-    my $milestones_result = $milestones->list(&get_target_repo($config, $opts), auto_pagination => 1);
+    my $milestones_result = $milestones->list(&get_target_repo($opts, $config), auto_pagination => 1);
     while (my $milestone = $milestones_result->next) {
         $ret->{$milestone->{title}} = $milestone->{number};
     }
@@ -387,8 +474,8 @@ sub parse_repo {
 }
 
 sub parse_auth {
-    my $config = shift;
     my $opts = shift;
+    my $config = shift;
     my $user = $opts->{user} || $config->{auth}->{user};
     my $token = $opts->{token} || $config->{auth}->{token};
     die "No GitHub user provided" unless $user;
