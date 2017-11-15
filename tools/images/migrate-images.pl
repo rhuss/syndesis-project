@@ -70,7 +70,7 @@ my $RELEASE_MAP =
        "registry" => "brew-pulp-docker01.web.prod.ext.phx2.redhat.com:8888/jboss-fuse-7-tech-preview",
        "images" =>
          {
-          "fuse-ignite-rest" => "1.1-1",
+          "fuse-ignite-rest" => "1.1-2",
           "fuse-ignite-ui" => "1.1-1",
           "fuse-ignite-verifier" => "1.1-1",
           "fuse-ignite-mapper" => "1.1-1"

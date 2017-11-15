@@ -1,0 +1,41 @@
+auth:
+  user: "syndesis-bot"
+  token: "...."
+
+target: "syndesisio/issue-import-test"
+
+labels:
+  approved: "0ffa16"
+  size/s: ""
+  size/m: ""
+  size/l: ""
+  size/xl: ""
+  category/bug: ""
+  category/enhancement: ""
+  category/question: ""
+  category/techdebt: ""
+  process/retro: ""
+  target/tp1: ""
+  target/tp2: ""
+  target/tp3: ""
+  target/tp4: ""
+  target/ga: ""
+
+repos:
+  rest:
+    name: "syndesisio/syndesis-rest"
+    label_mapping:
+      big: "size/xl"
+      WIP: "status/wip"
+      Epic: "Epic"
+      bug: "category/bug"
+      enhancement: "category/enhancement"
+      question: "category/question"
+      technical debt: "category/debt"
+      Retro Action Item: "process/retro"
+      wontfix: "category/wontfix"
+      blocked: "category/blocker"                                      
+      TP1: "target/tp1"
+      TP2: "target/tp2"
+      TP3: "target/tp3"                                      
+      approved: "approved"
